@@ -1,0 +1,39 @@
+        when RULE_INIT {
+            set static::cookie_sessionid [format "sessionid=null; path=/; Expires=Thurs, 01-Jan-1970 00:00:00 GMT;"]
+            set static::cookie_cadata [format "cadata=null; path=/; Expires=Thurs, 01-Jan-1970 00:00:00 GMT;"]
+            set static::cookie_usercontext [format "UserContext=null; path=/; Expires=Thurs, 01-Jan-1970 00:00:00 GMT;"]
+        }
+        when ACCESS_SESSION_STARTED {
+            if { [string tolower [HTTP::uri]] contains "ua=0" } {
+                ACCESS::session remove
+            }
+        }
+        when ACCESS_ACL_ALLOWED {
+            set apm_mrhsession [HTTP::cookie value "MRHSession"]
+            if { [table lookup $apm_mrhsession] == "EXCHANGE_LOGOUT" } {
+                ACCESS::session remove
+                table delete $apm_mrhsession
+            }
+        }
+        when HTTP_REQUEST {
+            set isset 0
+            if {[string tolower [HTTP::uri]] starts_with "/owa" } {
+                if {[string tolower [HTTP::uri]] contains "logoff" } {
+                    ACCESS::session remove
+                    HTTP::respond 302 Location "https://[HTTP::host]/vdesk/hangup.php3" "Set-Cookie" $static::cookie_sessionid "Set-Cookie" $static::cookie_cadata "Set-Cookie" $static::cookie_usercontext
+                } else {
+                    if { [string tolower [HTTP::uri]] contains "ua=0" } {
+                        set mrhsession [HTTP::cookie value "MRHSession"]
+                        set isset 1
+                    }
+                }
+            }
+        }
+        when HTTP_RESPONSE {
+            if { $isset == 1 } {
+                if { $mrhsession != "" && [HTTP::status] == 440 } {
+                    table set $apm_mrhsession "EXCHANGE_LOGOUT"
+                    return
+                }
+            }
+        }
