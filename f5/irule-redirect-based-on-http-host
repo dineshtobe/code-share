@@ -1,0 +1,13 @@
+# Irule to redirect based on http host
+# also redirects specific host to a port 80 vs the rest is redirected to https
+#  
+when HTTP_REQUEST {
+    switch [string tolower [HTTP::host]] {
+        "name.name.ca" { 
+            pool name.name.ca_pool
+        } 
+        default {
+             HTTP::redirect https://[getfield [HTTP::host] ":" 1][HTTP::uri]
+        }
+}
+}
