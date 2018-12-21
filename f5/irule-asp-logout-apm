@@ -1,0 +1,15 @@
+#logout out of custom APM Page using a classmap 
+#Kills some cookies also 
+# kill those cookies for aspsession id
+# Sebastian@s144.com
+when ACCESS_ACL_ALLOWED {
+    if {[class match [HTTP::uri] equals "logout_dg"] } {
+  #ACCESS::session remove
+   # HTTP::respond 302 Location "/vdesk/hangup.php3" 
+     ACCESS::respond 302 noserver Location "/vdesk/hangup.php3" "Set-Cookie" "ASP.NET_SessionId=;path=/; HttpOnly; Expires=Thu, 01-Jan-1970 00:00:00 GMT" "Set-Cookie" ".ASPXAUTH=;path=/; HttpOnly; Expires=Thu, 01-Jan-1970 00:00:00 GMT"  
+   # HTTP::respond 302 Location "https:/my.portmoody.ca/vdesk/hangup.php3" 
+   ACCESS::session remove
+    #   HTTP::cookie remove .ASPAUTHTISS
+        
+    } 
+}
