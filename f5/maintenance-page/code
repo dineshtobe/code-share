@@ -1,6 +1,6 @@
 2.	Task: Build Virtual Server Application 
 a.	Build and upload a maintenance webpage onto the F5.
-b.	SSH into the F5 device ssh 50.100.250.225 -port 22XXX
+b.	SSH into the F5 device ssh x.x.x.x
 i.	Login with: root/default
 c.	We will build a Maintenance page in the cli.
 d.	Build this page 
