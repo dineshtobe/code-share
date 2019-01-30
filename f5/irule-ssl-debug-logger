@@ -1,0 +1,346 @@
+#################################################################################
+#        Overview:
+#        ssl-logger - Diagnostic/educational tool for exploring SSL traffic with iRules
+#
+#        The following irule when applied to a virtual server will provide the following log information. 
+#        This iRule can be used to troubleshoot cipher issues in your production environment.
+#
+#
+#        Example log entry:
+#        |  VIP  |        Flow ID        | Event # | Time since flow start |      Event and Description      |
+#        test-vip slot0/tmm3-1397882043022543-00000 __________________________________________________________
+#        test-vip slot0/tmm3-1397882043022543-00001 [     0ms] FLOW_INIT:                          New flow initialized.
+#        test-vip slot0/tmm3-1397882043022543-00002 [     1ms] CLIENT_ACCEPTED:  New clientside flow created.
+#        test-vip slot0/tmm3-1397882043022543-00003 [     1ms] HTTP_REQUEST:    New HTTP request begun.
+#        test-vip slot0/tmm3-1397882043022543-00004 [     2ms] LB_SELECTED:                      Load balancing decision made.
+#        test-vip slot0/tmm3-1397882043022543-00005 [     3ms] SERVER_CONNECTED: New serverside flow created.
+#        test-vip slot0/tmm3-1397882043022543-00006 [    46ms] HTTP_RESPONSE: HTTP response to client begun.
+#        test-vip slot0/tmm3-1397882043022543-00007 [    98ms] SERVER_CLOSED: Serverside flow ended.
+#        test-vip slot0/tmm3-1397882043022543-00008 [   174ms] CLIENT_CLOSED:             Clientside flow ended.
+#
+#        In actual use, SSL and X509 details will be interspersed, and may be extremely verbose.
+#
+#        You may find this command helpful for watching low-volume in-order flows live on
+#        a given VIP:
+#          tail -f /var/log/ltm | grep <vip name> | cut -f 8- -d " "
+#
+#################################################################################
+ 
+ 
+proc flowid-gen {
+              # Find the name of this Virtual Server, minus the partition/path.
+              #
+              # Use these for the short VIP name
+              set vipsplit "[split "[virtual name]" /]"
+              set vipname "[lindex $vipsplit end]"
+              # Use this instead for the VIP name including partition path
+              #set vipname [virtual name]
+ 
+              # Start an event counter
+              set eventnum 1
+ 
+              # Mark the start time and create a unique ID for this flow
+              set flowtime "[clock clicks]"
+              set flowid "slot[TMM::cmp_group]/tmm[TMM::cmp_unit]-$flowtime"
+# this return left in iffy state due to no proc calls from flow_init experimentation
+              return "$vipname $flowid $flowtime $eventnum"
+}
+ 
+proc event-logger { vipname flowid flowtime eventnum eventmsg } {
+              # Increment the event counter
+              incr eventnum 1
+              # Calculate and format the elapsed time of this event from flow init (milliseconds)
+# When age hits 7 digits, divide by 1000 and use s instead of ms, append s/ms to newage var and format %8
+              set eventtime "[format "\[%6sms\]" [IP::stats age] ]"
+              # Generate the log entry
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[        \] _____________________________________________________________________________________________________________"
+# Implement running client-side an server-side IP::stats packets/bytes counter
+# calc and format for single/K/M B/KB/MB/GB (correct decimal handling and format % for both?)
+# pass cpi cpo cbi cbo spi spo sbi sbo vars between proc and events
+# [pkts in/out C 000000 000000 S 000000 000000] [xfer in/out C 000000 000000 S 000000 000000]
+              log -noname "$vipname $flowid-[format %05d $eventnum] $eventtime $eventmsg"
+              # Return the current event # for use in later event logs
+              return $eventnum
+} 
+proc ip-proto-logger { vipname flowid eventname eventnum } {
+#log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - proto logger"
+              if { ( $eventname eq "CLIENT_ACCEPTED" ) or ( $eventname eq "SERVER_CONNECTED" ) } {
+# Some figuring to turn ff:ff:ff:ff:ff:ff into ""/"nexthop: <undetermined>" or "nexthop: [LINK::nexthop]" on clientside and label
+# is it safe to assume lasthop on server_connect is always self?  What about L2/bridge scenarios?
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                 - L2 VLAN: [LINK::vlan_id]   QoS: [LINK::qos]   lasthop: [LINK::lasthop]   nexthop: [LINK::nexthop]"
+                           # catch no traffic class, print N/A
+# something to pick apart [LB::snat]
+# snip /Common on snatpool
+                           if { [clientside] eq 1 } { set src [IP::remote_addr] ; set dst [IP::local_addr] } else { set src [IP::local_addr] ; set dst [IP::remote_addr] }
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                 - L3 Src IP: $src   Dst IP: $dst"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                 - L3 Hop Estimate: [IP::hops]  Idle Timeout: [IP::idle_timeout]s  TOS: [IP::tos]  TTL: [IP::ttl]"
+ 
+                           # Uncomment the following if this is a TCP VIP, and be sure to comment the UDP and SCTP entries below
+                           if { [TCP::bandwidth] eq 0 } { set bandwidth "N/A" } else { set bandwidth [TCP::bandwidth] }
+ 
+                           # make sure we're using the right client/server ports in each context to catch proper translations, destinations. 
+ 
+                           if { [clientside] eq 1 } { set srctuple "[IP::remote_addr]:[TCP::remote_port]" ; set dsttuple "[IP::local_addr]:[TCP::local_port]" }
+                           else { set srctuple "[IP::local_addr]:[TCP::local_port]" ; set dsttuple "[IP::remote_addr]:[TCP::remote_port]" }
+log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                  - TCP Src IP/port: $srctuple   Dst IP/port: $dsttuple"  
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                 - TCP Src IP/port: [IP::client_addr]:[TCP::client_port] Dst IP/port: [IP::local_addr]:[TCP::local_port]"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                 - TCP Bandwidth Estimate: $bandwidth   RTT Estimate: [TCP::rtt]   MSS: [TCP::mss]"
+ 
+ 
+              }
+ 
+# just do these on close for now, maybe a running total by event as a loglevel?
+if { ( $eventname eq "CLIENT_CLOSED" ) or ( $eventname eq "SERVER_CLOSED" ) } {
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - IP packets in: [IP::stats pkts in]        out: [IP::stats pkts out]"
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - IP bytes in:   [IP::stats bytes in]    out: [IP::stats bytes out]"
+}
+ 
+}
+proc ssl-logger { vipname flowid eventnum eventname } {
+# Must remain commented unless clientssl or serverssl profile associated with VIP
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          - SSL Extension count: [SSL::extensions count]   Cert count: [SSL::cert count]"
+              # Make sure this is good for the 11.5 event too, without missing useful stuff
+              if { !($eventname contains "SEND") } {
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   - SSL Cipher: [SSL::cipher name]   Version: [SSL::cipher version]   Bits: [SSL::cipher bits]"
+              }
+              if { [SSL::is_renegotiation_secure] eq 0 } { set sslsr "No" } else { set sslsr "Yes" }
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          - SSL Renegotiation Mode: [SSL::secure_renegotiation]   Supported: $sslsr"
+              if { [SSL::sessionid] eq "" } { set sslsid "none" } else { set sslsid [SSL::sessionid] }
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          - SSL Session ID: $sslsid"
+              if { [SSL::cert count] > 0 } { call x509-logger $vipname $flowid $eventnum $eventname }
+}
+proc x509-logger { vipname flowid eventnum eventname } {
+              set loopcount [SSL::cert count]
+              set loopnum 0
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          --- X509 Verify Code: [SSL::verify_result]   Message: [X509::verify_cert_error_string [SSL::verify_result]]"
+              while 1 { 
+                           if { $loopnum eq $loopcount } { return } else {
+                                         set currentcert [SSL::cert $loopnum]
+                                         incr loopnum
+                           }
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum _______________________________________________________________________"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Subject: [X509::subject $currentcert]"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Serial: [X509::serial_number $currentcert]   Version: [X509::version $currentcert]"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Hash: [X509::hash $currentcert]"
+                            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Issuer: [X509::issuer $currentcert]"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Invalid Before: [X509::not_valid_before $currentcert]"
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Invalid After:  [X509::not_valid_after $currentcert]"
+# something to make sure RSA was the type
+                           log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname   --- X509 Cert #$loopnum Pub Key Type: [X509::subject_public_key_type $currentcert]   Bits: [X509::subject_public_key_RSA_bits $currentcert]   Signature: [X509::signature_algorithm $currentcert]"
+#too chatty for now
+#log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          --- X509 Cert #$loopnum Extensions: [X509::extensions $currentcert]"
+#log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          --- X509 Cert #$loopnum Pub Key: [X509::subject_public_key $currentcert]"
+#
+# 11.5+
+#if { [X509::subject_public_key type $currentcert] eq "EC" } { set $curve " Curve: [X509::subject_public_key curve_name $currentcert]" } else { set curve "" }
+#
+              }
+}
+proc test {
+              log -noname "test happened!"
+}
+ 
+# Rule and flow initialization      
+##
+# NOTE: Do not comment these two events, they are required for correct operation of this iRule.
+##
+ 
+# Expand RULE_INIT to include global logging settings
+when RULE_INIT { log -noname "Global RULE_INIT: s144-logger iRule loaded and initialized."}
+ 
+when FLOW_INIT { 
+####
+#### Note: looks like FLOW_INIT event doesn't allow procedure calls (TCL error).
+#### Tested under BIG-IP 11.4.1HF????
+#### Contents of flowid-gen proc pasted here, ghetto!
+####
+              # Find the name of this Virtual Server, minus the partition/path.
+              #
+              # Use these for the short VIP name
+              set vipsplit "[split "[virtual name]" /]"
+              set vipname "[lindex $vipsplit end]"
+              # Use this instead for the VIP name including partition path
+              #set vipname [virtual name]
+ 
+              # Start an event counter
+              set eventnum 1
+ 
+              # Mark the start time and create a unique ID for this flow
+              set flowtime "[clock clicks]"
+              set flowid "slot[TMM::cmp_group]/tmm[TMM::cmp_unit]-$flowtime"
+####
+####
+####
+              # Create VIP name and Flow ID variables (procedure call)
+# call flowid-gen
+ 
+              # Start the log chain.
+# When calls available in FLOW_INIT, feed these lines to standard logger proc?
+              log -noname "$vipname $flowid-00000 ========================================================================================================================"
+              log -noname "$vipname $flowid-00001 \[     0ms\] FLOW_INIT                                    INFO: New IP flow initialized."       
+# log level 2
+              log -noname "$vipname $flowid-00001 \[       +\] FLOW_INIT                                    - IPv[IP::version] Protocol [IP::protocol]"
+              log -noname "$vipname $flowid-00001 \[       +\] FLOW_INIT                                    - Src IP: [IP::remote_addr]   Dst IP: [IP::local_addr]   TOS: [IP::tos]   TTL: [IP::ttl]"        
+ 
+# Set a var to track # of CLASSIFICATION_DETECTED events for this flow
+set classevent 0
+}
+ 
+############################################
+# Enable or disable events below this line #
+############################################
+ 
+# IP       
+##
+ 
+# Differentiate messages here for informational differences between TCP/UDP/SCTP/other?
+ 
+when CLIENT_ACCEPTED { set eventname "CLIENT_ACCEPTED"
+#log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - L2 VLAN: [LINK::vlan_id] QoS: [LINK::qos] lasthop: [LINK::lasthop] nexthop: [LINK::nexthop] foo"
+              set eventmsg "CLIENT_ACCEPTED                          INFO: New clientside flow created."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ip-proto-logger $vipname $flowid $eventname $eventnum
+}
+when CLIENT_DATA { set eventname "CLIENT_DATA"
+              set eventmsg "CLIENT_DATA                    INFO: Client is sending data."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ip-proto-logger $vipname $flowid $eventname $eventnum
+}
+when CLIENT_CLOSED { set eventname "CLIENT_CLOSED"
+              set eventmsg "CLIENT_CLOSED                 INFO: Clientside flow ended."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ip-proto-logger $vipname $flowid $eventname $eventnum
+}
+when SERVER_CONNECTED { set eventname "SERVER_CONNECTED"
+              set eventmsg "SERVER_CONNECTED                      INFO: New serverside flow created."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ip-proto-logger $vipname $flowid $eventname $eventnum
+}
+when SERVER_DATA { set eventname "SERVER_DATA"
+              set eventmsg "SERVER_DATA                   INFO: Begin sending data to server/remote."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ip-proto-logger $vipname $flowid $eventname $eventnum
+}
+when SERVER_CLOSED { set eventname "SERVER_CLOSED"
+              set eventmsg "SERVER_CLOSED                INFO: Serverside flow ended."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ip-proto-logger $vipname $flowid $eventname $eventnum
+}
+ 
+# Load Balancing / serverside selection   
+##
+ 
+when LB_FAILED { set eventname "LB_FAILED"
+              set eventmsg "LB_FAILED                                        INFO: Load balancing selection failed."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+# write something when event info is empty
+log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                                - Failure reason: [event info]"
+}
+when LB_SELECTED { set eventname "LB_SELECTED"
+              set eventmsg "LB_SELECTED                     INFO: Load balancing decision made."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+# geo for selected member?
+#
+# Really need something for when no member availalbe and botch happens (e.g. defroute/no pool)
+# # snip /Common on pool
+log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                  - Pool: [LB::server pool]   Members: [members [LB::server pool]]   Active: [active_members [LB::server pool]]"
+# do this with [LB::server] in a nice TCL list single command? (still missing lassign, TCL verson diff)
+# should detect empty port/addr and not print?
+# test route domain, "default" if ""
+# if port is 0, it's a hop if not a member?  (or none if catch)
+if { [LB::server route_domain] eq "" } { set rd 0 } else { set rd [LB::server route_domain] }
+log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                  - Selected member/hop: [LB::server addr]:[LB::server port]   Status: [LB::status]   Route Domain: $rd"
+# test pri, ratio, weight, ripeness.  what is ripeness really?
+log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                  - Priority: [LB::server priority]   Ratio: [LB::server ratio]   Weight: [LB::server weight]   Ripeness: [LB::server ripeness]"
+log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                  - Traffic Class: [LB::class]   SNAT: [LB::snat]"
+}
+ 
+ 
+# HTTP processing
+# (Requires http profile, HTTP_PROXY_REQUEST and HTTP_DISABLED required BIG-IP 11.5+)
+##
+when HTTP_REQUEST { set eventname "HTTP_REQUEST"
+              set eventmsg "HTTP_REQUEST                 INFO: New HTTP request (#[HTTP::request_num] for this connection)."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+if { [HTTP::is_keepalive] } { set keepalive "" } else { set keepalive "   *Keep-Alive*" }
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP [HTTP::version]   Method: [HTTP::method]   Host: [HTTP::host]$keepalive"
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP Path: [HTTP::path]"
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP Query: [HTTP::query]"
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP Content-Length: [HTTP::header value "Content-Length"]   headers: [HTTP::header count]   cookies: [HTTP::cookie count]"
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP User-Agent: [HTTP::header value "User-Agent"]"
+ 
+}
+#when HTTP_REQUEST_DATA { set eventname "HTTP_REQUEST_DATA"
+# fix description
+#            set eventmsg "HTTP_REQUEST_DATA                    INFO: HTTP request data arriving."
+#            set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+#}
+ 
+#when HTTP_REQUEST_RELEASE { set eventname "HTTP_REQUEST_RELEASE"
+#            set eventmsg "HTTP_REQUEST_RELEASE INFO: HTTP request about to release to server."
+#            set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+#if { [HTTP::is_keepalive] } { set keepalive "" } else { set keepalive "   *Keep-Alive*" }
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP [HTTP::version]   Method: [HTTP::method]   Host: [HTTP::host]$keepalive"
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP Path: [HTTP::path]"
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP Query: [HTTP::query]"
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP Content-Length: [HTTP::header value "Content-Length"]   headers: [HTTP::header count]   cookies: [HTTP::cookie count]"
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP User-Agent: [HTTP::header value "User-Agent"]"
+#}
+ 
+when HTTP_RESPONSE { set eventname "HTTP_RESPONSE"
+              set eventmsg "HTTP_RESPONSE               INFO: HTTP response to client begun."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+if { [HTTP::is_redirect] } { set redirect "   *Redirect*" } else { set redirect "" }
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP status: [HTTP::status]$redirect"
+              log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname                        - HTTP content length: [HTTP::header value "Content-Length"]   headers: [HTTP::header count]   cookies: [HTTP::cookie count]"
+#
+ 
+# Check for Content-Type?
+ 
+}
+#when HTTP_RESPONSE_CONTINUE { set eventname "HTTP_RESPONSE_CONTINUE"
+#            set eventmsg "HTTP_RESPONSE_CONTINUE              INFO: Received HTTP 100 Continue from server."
+# log data about content lengths?
+#            set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+#}
+#when HTTP_RESPONSE_DATA { set eventname "HTTP_RESPONSE_DATA"
+# fix description
+#            set eventmsg "HTTP_RESPONSE_DATA:   HTTP response about to send to client."
+#            set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+#}
+#when HTTP_RESPONSE_RELEASE { set eventname "HTTP_RESPONSE_RELEASE"
+#            set eventmsg "HTTP_RESPONSE_RELEASE               INFO: HTTP request about to release to client."
+#            set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+#            if { [HTTP::is_redirect] } { set redirect "   *Redirect*" } else { set redirect "" }
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          - HTTP status: [HTTP::status]$redirect"
+#            log -noname "$vipname $flowid-[format %05d $eventnum] \[       +\] $eventname          - HTTP content length: [HTTP::header value "Content-Length"]   headers: [HTTP::header count]   cookies: [HTTP::cookie count]"
+# Check for Content-Type?
+#}
+ 
+ 
+# SSL processing
+# (Requires client/server SSL Profiles, CLIENTSSL_SERVERHELLO_SEND requires BIG-IP 11.5+)
+ 
+ 
+ 
+when CLIENTSSL_CLIENTHELLO { set eventname "CLIENTSSL_CLIENTHELLO"
+              set eventmsg "CLIENTSSL_CLIENTHELLO                INFO: Clientside SSL ClientHello received."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ssl-logger $vipname $flowid $eventnum $eventname
+}
+#when CLIENTSSL_SERVERHELLO_SEND { set eventname "CLIENTSSL_SERVERHELLO_SEND"
+# check this meaning
+#            set eventmsg "CLIENTSSL_SERVERHELLO_SEND              INFO: "
+#            set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+# log more stuff
+#}
+when CLIENTSSL_CLIENTCERT { set eventname "CLIENTSSL_CLIENTCERT"
+              set eventmsg "CLIENTSSL_CLIENTCERT    INFO: Requested certificate from client."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ssl-logger $vipname $flowid $eventnum $eventname
+}
+when CLIENTSSL_HANDSHAKE { set eventname "CLIENTSSL_HANDSHAKE"
+              set eventmsg "CLIENTSSL_HANDSHAKE   INFO: Clientside SSL handshake completed."
+              set eventnum [call event-logger $vipname $flowid $flowtime $eventnum $eventmsg]
+              call ssl-logger $vipname $flowid $eventnum $eventname
+}
